@@ -1,0 +1,50 @@
+name: MGC Liquidity Sweep Bot
+
+on:
+  schedule:
+    # Runs every 15 minutes. GitHub does not guarantee exact timing --
+    # especially on free/public runners, this can slip by several minutes
+    # (sometimes more during high load). The bot's catch-up logic handles
+    # this: it checks EVERY candle since its last recorded state, not just
+    # the most recent one, so a late or occasionally-skipped run never
+    # causes a signal to be missed.
+    - cron: '*/15 * * * *'
+  workflow_dispatch: {}   # lets you trigger a run manually from the Actions tab, for testing
+
+permissions:
+  contents: write   # needed so the workflow can commit state.json back to the repo
+
+jobs:
+  check-for-sweep:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run sweep bot
+        env:
+          TOPSTEPX_USERNAME: ${{ secrets.TOPSTEPX_USERNAME }}
+          TOPSTEPX_API_KEY: ${{ secrets.TOPSTEPX_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python sweep_bot.py
+
+      - name: Commit updated state (if changed)
+        run: |
+          git config user.name "sweep-bot"
+          git config user.email "sweep-bot@users.noreply.github.com"
+          if git diff --quiet -- state.json; then
+            echo "No state change, nothing to commit."
+          else
+            git add state.json
+            git commit -m "Update bot state [skip ci]"
+            git push
+          fi
