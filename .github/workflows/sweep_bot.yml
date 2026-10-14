@@ -8,7 +8,7 @@ on:
     # this: it checks EVERY candle since its last recorded state, not just
     # the most recent one, so a late or occasionally-skipped run never
     # causes a signal to be missed.
-    - cron: '*/15 * * * *'
+    - cron: '*/5 * * * *'
   workflow_dispatch: {}   # lets you trigger a run manually from the Actions tab, for testing
 
 permissions:
