@@ -7,12 +7,24 @@ candle already checked) is persisted to state.json, committed back to the
 repo by the workflow after each run, so the bot knows where it left off
 even though each run starts on a fresh, empty GitHub-hosted machine.
 
-Detects the same pattern as before:
-  (A) SWING_LOW_SWEEP:       pierces a confirmed left-side swing low, then
-                              closes back above it (reclaim).
-  (B) PREV_CANDLE_LOW_SWEEP: the prior candle was bearish, this candle's
-                              low dips below that prior low, then closes
-                              back above it (reclaim).
+Detects the pattern in BOTH directions:
+
+  BULLISH (candle closes above its open):
+    (A) SWING_LOW_SWEEP:       pierces a confirmed left-side swing low, then
+                                closes back above it (reclaim).
+    (B) PREV_CANDLE_LOW_SWEEP: the prior candle was bearish, this candle's
+                                low dips below that prior low, then closes
+                                back above it (reclaim).
+
+  BEARISH (candle closes below its open) -- exact mirror:
+    (A) SWING_HIGH_SWEEP:       pierces a confirmed left-side swing high,
+                                 then closes back below it (reclaim).
+    (B) PREV_CANDLE_HIGH_SWEEP: the prior candle was bullish, this candle's
+                                 high pokes above that prior high, then
+                                 closes back below it (reclaim).
+
+Every alert is explicitly labeled BULLISH or BEARISH so you always know
+which direction the signal is pointing.
 
 Robustness: processes EVERY candle newer than the last recorded state, not
 just the single most recent one. This matters because GitHub Actions'
@@ -182,27 +194,62 @@ def clean_alternating(swings):
 
 
 def check_sweep_candle(df, swings, i):
+    """
+    Checks bar i for a liquidity-sweep pattern in EITHER direction:
+
+    BULLISH (candle closes > opens):
+      (A) SWING_LOW_SWEEP:       pierces a confirmed swing low, closes back above it.
+      (B) PREV_CANDLE_LOW_SWEEP: prior candle was bearish, this candle's low
+                                  dips below that prior low, closes back above it.
+
+    BEARISH (candle closes < opens) -- exact mirror:
+      (A) SWING_HIGH_SWEEP:       pierces a confirmed swing high, closes back below it.
+      (B) PREV_CANDLE_HIGH_SWEEP: prior candle was bullish, this candle's high
+                                   pokes above that prior high, closes back below it.
+
+    A doji (close == open) matches neither direction and is skipped.
+    Returns (direction, conditions_hit, swing_ref_price, prev_ref_price).
+    """
     bar = df.iloc[i]
     prev = df.iloc[i - 1]
-    if not (bar["close"] > bar["open"]):
-        return [], None, None
+
+    if bar["close"] > bar["open"]:
+        direction = "BULLISH"
+    elif bar["close"] < bar["open"]:
+        direction = "BEARISH"
+    else:
+        return None, [], None, None
 
     conditions_hit = []
-    swing_lows = [s for s in swings if s["type"] == "low"]
-    eligible_lows = [s for s in swing_lows if s["confirm_time"] <= bar["timestamp"] and s["idx"] < i]
-    swept_swing = None
-    if eligible_lows:
-        candidate = eligible_lows[-1]
-        if bar["low"] < candidate["price"] and bar["close"] > candidate["price"]:
-            conditions_hit.append("SWING_LOW_SWEEP")
-            swept_swing = candidate
+    swing_ref_price = None
+    prev_ref_price = None
 
-    prev_bearish = prev["close"] < prev["open"]
-    swept_prev_low = prev_bearish and bar["low"] < prev["low"] and bar["close"] > prev["low"]
-    if swept_prev_low:
-        conditions_hit.append("PREV_CANDLE_LOW_SWEEP")
+    if direction == "BULLISH":
+        swing_lows = [s for s in swings if s["type"] == "low"]
+        eligible = [s for s in swing_lows if s["confirm_time"] <= bar["timestamp"] and s["idx"] < i]
+        if eligible:
+            candidate = eligible[-1]
+            if bar["low"] < candidate["price"] and bar["close"] > candidate["price"]:
+                conditions_hit.append("SWING_LOW_SWEEP")
+                swing_ref_price = candidate["price"]
+        prev_bearish = prev["close"] < prev["open"]
+        if prev_bearish and bar["low"] < prev["low"] and bar["close"] > prev["low"]:
+            conditions_hit.append("PREV_CANDLE_LOW_SWEEP")
+            prev_ref_price = prev["low"]
+    else:  # BEARISH
+        swing_highs = [s for s in swings if s["type"] == "high"]
+        eligible = [s for s in swing_highs if s["confirm_time"] <= bar["timestamp"] and s["idx"] < i]
+        if eligible:
+            candidate = eligible[-1]
+            if bar["high"] > candidate["price"] and bar["close"] < candidate["price"]:
+                conditions_hit.append("SWING_HIGH_SWEEP")
+                swing_ref_price = candidate["price"]
+        prev_bullish = prev["close"] > prev["open"]
+        if prev_bullish and bar["high"] > prev["high"] and bar["close"] < prev["high"]:
+            conditions_hit.append("PREV_CANDLE_HIGH_SWEEP")
+            prev_ref_price = prev["high"]
 
-    return conditions_hit, (swept_swing["price"] if swept_swing else None), (prev["low"] if swept_prev_low else None)
+    return direction, conditions_hit, swing_ref_price, prev_ref_price
 
 
 # --------------------------------------------------------------------------
@@ -253,16 +300,19 @@ def main():
     alerts_sent = 0
     for idx in new_bars.index:
         bar = df.iloc[idx]
-        conditions, swept_swing_price, prev_low = check_sweep_candle(df, swings, idx)
+        direction, conditions, swing_ref_price, prev_ref_price = check_sweep_candle(df, swings, idx)
 
         if conditions:
             tag = "⭐ BOTH" if len(conditions) == 2 else conditions[0]
+            icon = "🎯" if direction == "BULLISH" else "🔻"
             extra = []
-            if swept_swing_price is not None:
-                extra.append(f"swept swing low {swept_swing_price:.1f}")
-            if prev_low is not None:
-                extra.append(f"swept prior candle low {prev_low:.1f}")
-            msg = (f"🎯 LIQUIDITY SWEEP [{tag}] on {TIMEFRAME_LABEL} @ {bar['timestamp']}\n"
+            if swing_ref_price is not None:
+                level_word = "swing low" if direction == "BULLISH" else "swing high"
+                extra.append(f"swept {level_word} {swing_ref_price:.1f}")
+            if prev_ref_price is not None:
+                level_word = "prior candle low" if direction == "BULLISH" else "prior candle high"
+                extra.append(f"swept {level_word} {prev_ref_price:.1f}")
+            msg = (f"{icon} {direction} LIQUIDITY SWEEP [{tag}] on {TIMEFRAME_LABEL} @ {bar['timestamp']}\n"
                    f"O={bar['open']:.1f} H={bar['high']:.1f} L={bar['low']:.1f} C={bar['close']:.1f}\n"
                    f"({'; '.join(extra)})")
             print(msg)
