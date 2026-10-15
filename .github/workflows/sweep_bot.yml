@@ -38,13 +38,12 @@ jobs:
         run: python sweep_bot.py
 
       - name: Commit updated state (if changed)
-        run: |
-          git config user.name "sweep-bot"
-          git config user.email "sweep-bot@users.noreply.github.com"
-          if git diff --quiet -- state.json; then
-            echo "No state change, nothing to commit."
-          else
-            git add state.json
-            git commit -m "Update bot state [skip ci]"
-            git push
-          fi
+        run: git config user.name "sweep-bot"
+git config user.email "sweep-bot@users.noreply.github.com"
+git add state.json
+if git diff --cached --quiet -- state.json; then
+  echo "No state change, nothing to commit."
+else
+  git commit -m "Update bot state [skip ci]"
+  git push
+fi
