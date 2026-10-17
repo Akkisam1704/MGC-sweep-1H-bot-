@@ -127,6 +127,32 @@ def find_mgc_contract(session, token):
     return contract_id
 
 
+def timeframe_delta():
+    """Length of one candle, derived from the timeframe settings at the top."""
+    if TIMEFRAME_UNIT == 2:
+        return pd.Timedelta(minutes=TIMEFRAME_UNIT_NUMBER)
+    if TIMEFRAME_UNIT == 3:
+        return pd.Timedelta(hours=TIMEFRAME_UNIT_NUMBER)
+    die(f"Unsupported TIMEFRAME_UNIT {TIMEFRAME_UNIT}: use 2 (minutes) or 3 (hours).")
+
+
+def drop_unclosed_bars(df, now=None):
+    """
+    Safety net: keep only candles that have FULLY CLOSED.
+
+    The API is already asked for closed candles only (includePartialBar=False),
+    but the bot must never act on a candle that is still forming, so this does
+    not rely on that flag. Bar timestamps are candle OPEN times, so a candle is
+    closed once (open time + candle length) is in the past.
+    """
+    now = pd.Timestamp.now(tz="UTC") if now is None else now
+    closed = df[df["timestamp"] + timeframe_delta() <= now]
+    dropped = len(df) - len(closed)
+    if dropped:
+        print(f"Ignored {dropped} unfinished candle(s) still forming.")
+    return closed.reset_index(drop=True)
+
+
 def fetch_bars(session, token, contract_id):
     headers = {"accept": "text/plain", "Content-Type": "application/json", "Authorization": f"Bearer {token}"}
     end = datetime.now(timezone.utc)
@@ -150,8 +176,9 @@ def fetch_bars(session, token, contract_id):
     df = pd.DataFrame(bars).rename(columns={
         "t": "timestamp", "o": "open", "h": "high", "l": "low", "c": "close", "v": "volume"
     })
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
-    return df.sort_values("timestamp").reset_index(drop=True)
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+    df = df.sort_values("timestamp").reset_index(drop=True)
+    return drop_unclosed_bars(df)
 
 
 # --------------------------------------------------------------------------
