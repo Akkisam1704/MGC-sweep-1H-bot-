@@ -2,13 +2,23 @@ name: MGC Liquidity Sweep Bot
 
 on:
   schedule:
-    # Runs every 5 minutes (GitHub's practical minimum). Timing is not exact;
-    # the bot catches up on any candles it missed between runs.
+    # Runs every 5 minutes -- GitHub's practical minimum for scheduled
+    # workflows. GitHub does not guarantee exact timing -- especially on
+    # free/public runners, this can slip by several minutes (sometimes more
+    # during high load). The bot's catch-up logic handles this: it checks
+    # EVERY candle since its last recorded state, not just the most recent
+    # one, so a late or occasionally-skipped run never causes a signal to
+    # be missed.
     - cron: '*/5 * * * *'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      send_test:
+        description: 'Send a test Telegram message (checks your Telegram secrets)'
+        type: boolean
+        default: false
 
 permissions:
-  contents: write
+  contents: write   # needed so the workflow can commit state.json back to the repo
 
 jobs:
   check-for-sweep:
@@ -16,6 +26,21 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+
+      - name: Send Telegram test message (only when the checkbox is ticked)
+        if: ${{ github.event.inputs.send_test == 'true' }}
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          # --fail-with-body makes this step turn RED and print Telegram's
+          # error text if the token or chat id is wrong.
+          curl --silent --show-error --fail-with-body \
+            -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=✅ Test message from your MGC sweep bot. If you can read this, Telegram alerts are working."
+          echo
+          echo "Telegram accepted the test message."
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -37,6 +62,9 @@ jobs:
         run: |
           git config user.name "sweep-bot"
           git config user.email "sweep-bot@users.noreply.github.com"
+          # Stage first, THEN check. A plain 'git diff' ignores brand-new
+          # (untracked) files, which meant state.json was never saved on the
+          # first run and the bot re-baselined every time, never alerting.
           git add state.json
           if git diff --cached --quiet -- state.json; then
             echo "No state change, nothing to commit."
