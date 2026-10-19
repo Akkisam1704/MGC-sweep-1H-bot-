@@ -20,6 +20,13 @@ on:
 permissions:
   contents: write   # needed so the workflow can commit state.json back to the repo
 
+# Only one run at a time. A second run waits for the first to finish, so two
+# runs can never fight over state.json (which caused rejected pushes and
+# repeated alerts).
+concurrency:
+  group: sweep-bot
+  cancel-in-progress: false
+
 jobs:
   check-for-sweep:
     runs-on: ubuntu-latest
@@ -68,7 +75,20 @@ jobs:
           git add state.json
           if git diff --cached --quiet -- state.json; then
             echo "No state change, nothing to commit."
-          else
-            git commit -m "Update bot state [skip ci]"
-            git push
+            exit 0
           fi
+          git commit -m "Update bot state [skip ci]"
+          # If the repo changed while this run was going (your own edits, or
+          # another run), pull those changes in first and try again. If
+          # state.json itself clashes, this run's copy wins: it is the newest.
+          for attempt in 1 2 3 4; do
+            if git pull --rebase -X theirs origin main && git push origin HEAD:main; then
+              echo "State saved."
+              exit 0
+            fi
+            echo "Push attempt $attempt failed, retrying..."
+            git rebase --abort 2>/dev/null || true
+            sleep $((attempt * 3))
+          done
+          echo "Could not save state after several attempts."
+          exit 1
