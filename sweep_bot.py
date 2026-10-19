@@ -55,6 +55,15 @@ TIMEFRAME_LABEL = "1HR"
 LOOKBACK_DAYS = 30
 STATE_FILE = "state.json"
 
+# Shown in the run log so you can always tell which version is running.
+BOT_VERSION = "v3 closed-candle-only"
+
+# A candle is only judged once it has been closed for at least this long.
+# Gives the data feed time to finish building the final bar after the close.
+CLOSE_BUFFER_SECONDS = 60
+
+DISPLAY_TZ = "Asia/Kolkata"   # times printed in alerts (IST)
+
 
 def die(msg):
     print(f"❌ {msg}", file=sys.stderr)
@@ -136,24 +145,30 @@ def timeframe_delta():
     die(f"Unsupported TIMEFRAME_UNIT {TIMEFRAME_UNIT}: use 2 (minutes) or 3 (hours).")
 
 
-def drop_unclosed_bars(df, now=None):
+def utc_now():
+    return pd.Timestamp.now(tz="UTC")
+
+
+def drop_unclosed_bars(df, now):
     """
-    Safety net: keep only candles that have FULLY CLOSED.
+    Keep only candles that have FULLY CLOSED (plus a short safety buffer).
 
     The API is already asked for closed candles only (includePartialBar=False),
     but the bot must never act on a candle that is still forming, so this does
     not rely on that flag. Bar timestamps are candle OPEN times, so a candle is
-    closed once (open time + candle length) is in the past.
+    closed once (open time + candle length) is in the past, and it is only
+    judged CLOSE_BUFFER_SECONDS after that.
     """
-    now = pd.Timestamp.now(tz="UTC") if now is None else now
-    closed = df[df["timestamp"] + timeframe_delta() <= now]
+    cutoff = timeframe_delta() + pd.Timedelta(seconds=CLOSE_BUFFER_SECONDS)
+    closed = df[df["timestamp"] + cutoff <= now]
     dropped = len(df) - len(closed)
     if dropped:
-        print(f"Ignored {dropped} unfinished candle(s) still forming.")
+        print(f"Ignored {dropped} candle(s) that are still forming or just closed "
+              f"(waiting {CLOSE_BUFFER_SECONDS}s after the close).")
     return closed.reset_index(drop=True)
 
 
-def fetch_bars(session, token, contract_id):
+def fetch_bars(session, token, contract_id, now):
     headers = {"accept": "text/plain", "Content-Type": "application/json", "Authorization": f"Bearer {token}"}
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=LOOKBACK_DAYS)
@@ -178,7 +193,7 @@ def fetch_bars(session, token, contract_id):
     })
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     df = df.sort_values("timestamp").reset_index(drop=True)
-    return drop_unclosed_bars(df)
+    return drop_unclosed_bars(df, now)
 
 
 # --------------------------------------------------------------------------
@@ -292,13 +307,16 @@ def main():
     if not username or not api_key:
         die("Missing TOPSTEPX_USERNAME / TOPSTEPX_API_KEY environment variables.")
 
+    now_utc = utc_now()
+    print(f"sweep_bot {BOT_VERSION} | run time {now_utc.tz_convert(DISPLAY_TZ):%Y-%m-%d %H:%M:%S} IST")
+
     state = load_state()
     last_checked_time = pd.Timestamp(state["last_checked_time"]) if state["last_checked_time"] else None
 
     session = requests.Session()
     token = authenticate(session, username, api_key)
     contract_id = find_mgc_contract(session, token)
-    df = fetch_bars(session, token, contract_id)
+    df = fetch_bars(session, token, contract_id, now_utc)
 
     if len(df) < (2 * FRACTAL_N + 2):
         print("Not enough bars yet, skipping this run.")
@@ -339,9 +357,14 @@ def main():
             if prev_ref_price is not None:
                 level_word = "prior candle low" if direction == "BULLISH" else "prior candle high"
                 extra.append(f"swept {level_word} {prev_ref_price:.1f}")
-            msg = (f"{icon} {direction} LIQUIDITY SWEEP [{tag}] on {TIMEFRAME_LABEL} @ {bar['timestamp']}\n"
+            opened = bar["timestamp"].tz_convert(DISPLAY_TZ)
+            closed_at = (bar["timestamp"] + timeframe_delta()).tz_convert(DISPLAY_TZ)
+            sent_at = now_utc.tz_convert(DISPLAY_TZ)
+            msg = (f"{icon} {direction} LIQUIDITY SWEEP [{tag}] on {TIMEFRAME_LABEL}\n"
+                   f"Candle {opened:%d-%b %H:%M} to {closed_at:%H:%M} IST (CLOSED)\n"
                    f"O={bar['open']:.1f} H={bar['high']:.1f} L={bar['low']:.1f} C={bar['close']:.1f}\n"
-                   f"({'; '.join(extra)})")
+                   f"({'; '.join(extra)})\n"
+                   f"Alert sent {sent_at:%H:%M} IST")
             print(msg)
             send_telegram_alert(bot_token, chat_id, msg)
             alerts_sent += 1
