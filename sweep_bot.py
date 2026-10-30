@@ -38,6 +38,7 @@ not Colab Secrets:
 import os
 import sys
 import json
+import time
 import requests
 import numpy as np
 import pandas as pd
@@ -56,11 +57,16 @@ LOOKBACK_DAYS = 30
 STATE_FILE = "state.json"
 
 # Shown in the run log so you can always tell which version is running.
-BOT_VERSION = "v3 closed-candle-only"
+BOT_VERSION = "v4 closed-candle-only + waits for the close"
 
 # A candle is only judged once it has been closed for at least this long.
 # Gives the data feed time to finish building the final bar after the close.
-CLOSE_BUFFER_SECONDS = 60
+CLOSE_BUFFER_SECONDS = 30
+
+# If a run starts shortly BEFORE a candle closes (e.g. triggered at HH:59 by an
+# external scheduler), it waits for the close instead of ending early. It will
+# wait at most this long.
+MAX_WAIT_SECONDS = 150
 
 DISPLAY_TZ = "Asia/Kolkata"   # times printed in alerts (IST)
 
@@ -147,6 +153,35 @@ def timeframe_delta():
 
 def utc_now():
     return pd.Timestamp.now(tz="UTC")
+
+
+def next_close_after(now):
+    """Next moment a candle closes. Candles are aligned to the UTC clock
+    (1H candles close at HH:00, 30M candles at HH:00 and HH:30)."""
+    delta = timeframe_delta()
+    epoch = pd.Timestamp("1970-01-01", tz="UTC")
+    return epoch + ((now - epoch) // delta + 1) * delta
+
+
+def wait_for_candle_close(now):
+    """
+    If a candle is about to close (or closed a few seconds ago and is still
+    inside the safety buffer), sleep until it is ready to be judged, then
+    return the new current time. Otherwise return `now` unchanged.
+
+    Nothing is judged early: the wait ends CLOSE_BUFFER_SECONDS AFTER the close.
+    """
+    delta = timeframe_delta()
+    upcoming = next_close_after(now)
+    for close in (upcoming - delta, upcoming):          # the one just passed, and the next one
+        ready_at = close + pd.Timedelta(seconds=CLOSE_BUFFER_SECONDS)
+        wait = (ready_at - now).total_seconds()
+        if 0 < wait <= MAX_WAIT_SECONDS:
+            print(f"Candle closes at {close.tz_convert(DISPLAY_TZ):%H:%M:%S} IST; "
+                  f"waiting {wait:.0f}s so it is judged right after the close.")
+            time.sleep(wait)
+            return utc_now()
+    return now
 
 
 def drop_unclosed_bars(df, now):
@@ -309,6 +344,7 @@ def main():
 
     now_utc = utc_now()
     print(f"sweep_bot {BOT_VERSION} | run time {now_utc.tz_convert(DISPLAY_TZ):%Y-%m-%d %H:%M:%S} IST")
+    now_utc = wait_for_candle_close(now_utc)
 
     state = load_state()
     last_checked_time = pd.Timestamp(state["last_checked_time"]) if state["last_checked_time"] else None
